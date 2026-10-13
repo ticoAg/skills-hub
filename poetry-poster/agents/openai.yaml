@@ -1,0 +1,4 @@
+interface:
+  display_name: "诗词意境海报"
+  short_description: "从原诗提炼意境，生成贴合诗意、有准确中文排版且构图不雷同的东方封面海报"
+  default_prompt: "使用 $poetry-poster，将这首诗词绘成 9:16 东方极简封面海报，保留核心意象，配上准确原句，并与此前构图拉开差异。"
