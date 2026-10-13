@@ -1,4 +1,4 @@
 interface:
   display_name: "诗词意境海报"
-  short_description: "从原诗提炼意境，生成贴合诗意、有准确中文排版且构图不雷同的东方封面海报"
-  default_prompt: "使用 $poetry-poster，将这首诗词绘成 9:16 东方极简封面海报，保留核心意象，配上准确原句，并与此前构图拉开差异。"
+  short_description: "从原文意境推导风格、尺寸与比例，生成准确排字且构图有变化的诗词海报"
+  default_prompt: "使用 $poetry-poster，根据这首诗词的意境与用途自行选择风格、比例和合适尺寸，保留核心关系，配上准确原句，并与可见历史作品拉开构图差异。"

@@ -2,9 +2,11 @@
 """Track accepted poster compositions; stdlib only, no image/API calls."""
 
 import argparse
+from fractions import Fraction
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import sys
 import unicodedata
@@ -15,6 +17,61 @@ AXES = (
 )
 SPATIAL = AXES[:4]
 SCHEMA_VERSION = 1
+
+
+def parse_ratio(value):
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9]+(?:\.[0-9]+)?:[0-9]+(?:\.[0-9]+)?", value
+    ):
+        raise ValueError("aspect_ratio must be positive width:height, such as 3:2")
+    width, height = map(Fraction, value.split(":"))
+    if width <= 0 or height <= 0:
+        raise ValueError("aspect_ratio components must be positive")
+    return width / height
+
+
+def validate_presentation(plan):
+    if "presentation" not in plan:
+        return  # Legacy seven-axis records remain valid without migration.
+    presentation = plan["presentation"]
+    if not isinstance(presentation, dict):
+        raise ValueError("presentation must be an object")
+    for key in ("style", "style_reason", "ratio_reason", "size_policy"):
+        if not isinstance(presentation.get(key), str) or not presentation[key].strip():
+            raise ValueError(f"presentation.{key} must be nonempty text")
+    policy = presentation["size_policy"]
+    if policy not in ("adaptive", "exact"):
+        raise ValueError("size_policy must be adaptive or exact")
+    ratio = parse_ratio(presentation.get("aspect_ratio"))
+    for key in ("target_size", "actual_size"):
+        if key not in presentation:
+            continue
+        size = presentation[key]
+        if (not isinstance(size, list) or len(size) != 2
+                or any(type(x) is not int or x <= 0 for x in size)):
+            raise ValueError(f"{key} must be [positive integer width, height]")
+        delta = abs(Fraction(size[0], size[1]) / ratio - 1)
+        if (policy == "exact" and delta != 0) or delta > Fraction(1, 100):
+            raise ValueError(f"{key} does not satisfy the selected ratio and size policy")
+    if (policy == "exact" and "target_size" in presentation
+            and "actual_size" in presentation
+            and presentation["target_size"] != presentation["actual_size"]):
+        raise ValueError("exact actual_size must match target_size")
+
+
+def presentation_changes(plan, previous):
+    current = plan.get("presentation", {})
+    old = previous.get("presentation", {})
+    result = {}
+    for key in ("style", "aspect_ratio", "target_size", "actual_size"):
+        if key not in current or key not in old:
+            result[key] = "unknown"
+            continue
+        a, b = current[key], old[key]
+        if key == "aspect_ratio":
+            a, b = parse_ratio(a), parse_ratio(b)
+        result[key] = "same" if a == b else "changed"
+    return result
 
 
 def validate_plan(plan):
@@ -40,6 +97,7 @@ def validate_plan(plan):
         raise ValueError("locked_axes must be a list of known axis names")
     if len(locked) != len(set(locked)):
         raise ValueError("locked_axes must not contain duplicates")
+    validate_presentation(plan)
     return plan
 
 
@@ -125,7 +183,10 @@ def analyze(plan, history):
     validate_plan(plan)
     unlocked = [axis for axis in AXES if axis not in plan.get("locked_axes", [])]
     conflicts = []
+    extra_changes = []
     for previous in history:
+        extra_changes.append({"history_id": previous["id"],
+                              **presentation_changes(plan, previous["plan"])})
         changed = [axis for axis in unlocked
                    if plan["axes"][axis] != previous["plan"]["axes"][axis]]
         spatial_changed = [axis for axis in changed if axis in SPATIAL]
@@ -142,6 +203,7 @@ def analyze(plan, history):
         "history_count": len(history),
         "unlocked_axes": unlocked,
         "conflicts": conflicts,
+        "presentation_changes": extra_changes,
         "note": "composition heuristic only; inspect poetry fidelity, typography and actual images",
     }
 
@@ -153,6 +215,9 @@ def check(db, plan):
 
 def record(db, plan, artifact):
     validate_plan(plan)
+    presentation = plan.get("presentation", {})
+    if presentation.get("size_policy") == "exact" and "actual_size" not in presentation:
+        raise ValueError("recording exact output requires measured actual_size")
     if not isinstance(artifact, str) or not artifact.strip():
         raise ValueError("artifact must identify an actually generated and accepted image")
     path = Path(db).resolve()

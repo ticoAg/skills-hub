@@ -27,6 +27,20 @@ def plan():
     }
 
 
+def adaptive_plan():
+    result = plan()
+    result["presentation"] = {
+        "style": "疏淡寒江水墨",
+        "style_reason": "大空江与微小舟翁形成空寂对照",
+        "aspect_ratio": "3:2",
+        "ratio_reason": "用横向空间表现舟翁与岸山之间的距离",
+        "size_policy": "adaptive",
+        "target_size": [1536, 1024],
+        "actual_size": [1536, 1024],
+    }
+    return result
+
+
 class HistoryBehavior(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -138,6 +152,81 @@ class HistoryBehavior(unittest.TestCase):
         invalid = run("check")
         self.assertEqual(invalid.returncode, 1)
         self.assertIn("error", json.loads(invalid.stderr))
+
+    def test_new_presentation_roundtrips_with_old_history_without_migration(self):
+        history.record(self.db, plan(), "legacy-image")
+        candidate = adaptive_plan()
+        candidate["axes"].update(layout="horizontal-bands", viewpoint="water-level",
+                                 typography="side-vertical")
+        self.assertTrue(history.record(self.db, candidate, "new-image")["accepted"])
+        records = history.read_history(self.db)
+        self.assertEqual(records[0]["plan"]["presentation"], candidate["presentation"])
+        self.assertNotIn("presentation", records[1]["plan"])
+        conn = sqlite3.connect(self.db)
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 1)
+        conn.close()
+
+    def test_style_ratio_and_pixel_changes_alone_do_not_bypass_novelty(self):
+        history.record(self.db, adaptive_plan(), "first-image")
+        candidate = adaptive_plan()
+        candidate["presentation"].update(style="写实摄影", aspect_ratio="1:1",
+                                         target_size=[1024, 1024], actual_size=[1024, 1024])
+        report = history.check(self.db, candidate)
+        self.assertFalse(report["accepted"])
+        self.assertEqual(report["presentation_changes"][0]["style"], "changed")
+        self.assertEqual(report["presentation_changes"][0]["aspect_ratio"], "changed")
+
+    def test_equivalent_ratios_and_unknown_legacy_metadata(self):
+        history.record(self.db, adaptive_plan(), "first-image")
+        candidate = adaptive_plan()
+        candidate["presentation"]["aspect_ratio"] = "6:4"
+        report = history.check(self.db, candidate)
+        self.assertEqual(report["presentation_changes"][0]["aspect_ratio"], "same")
+        old = plan()
+        report = history.check(self.db, old)
+        self.assertEqual(report["presentation_changes"][0]["aspect_ratio"], "unknown")
+
+    def test_adaptive_rounding_is_recorded_but_major_ratio_deviation_is_rejected(self):
+        candidate = adaptive_plan()
+        candidate["presentation"].update(aspect_ratio="9:16", actual_size=[941, 1672])
+        del candidate["presentation"]["target_size"]
+        self.assertTrue(history.record(self.db, candidate, "rounded-image")["accepted"])
+        self.assertEqual(history.read_history(self.db)[0]["plan"]["presentation"]["actual_size"],
+                         [941, 1672])
+        candidate["presentation"]["actual_size"] = [1200, 1200]
+        with self.assertRaises(ValueError):
+            history.record(self.db, candidate, "wrong-ratio-image")
+        self.assertEqual(len(history.read_history(self.db)), 1)
+
+    def test_exact_output_requires_measurement_and_exact_pixels(self):
+        candidate = adaptive_plan()
+        candidate["presentation"]["size_policy"] = "exact"
+        del candidate["presentation"]["actual_size"]
+        self.assertTrue(history.check(self.db, candidate)["accepted"])
+        with self.assertRaises(ValueError):
+            history.record(self.db, candidate, "unmeasured-image")
+        self.assertFalse(self.db.exists())
+        candidate["presentation"]["actual_size"] = [3072, 2048]
+        with self.assertRaises(ValueError):
+            history.record(self.db, candidate, "wrong-pixels-image")
+        candidate["presentation"]["actual_size"] = [1536, 1024]
+        self.assertTrue(history.record(self.db, candidate, "exact-image")["accepted"])
+
+    def test_exact_ratio_only_and_invalid_presentation_inputs(self):
+        candidate = adaptive_plan()
+        candidate["presentation"]["size_policy"] = "exact"
+        del candidate["presentation"]["target_size"]
+        self.assertTrue(history.record(self.db, candidate, "exact-ratio-image")["accepted"])
+        for ratio in ("0:1", "1:0", "-1:2", "auto", "16x9", "NaN:1"):
+            with self.subTest(ratio=ratio), self.assertRaises(ValueError):
+                bad = adaptive_plan()
+                bad["presentation"]["aspect_ratio"] = ratio
+                history.validate_plan(bad)
+        for size in ([True, 1024], [0, 1024], [1536.0, 1024], [1024]):
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                bad = adaptive_plan()
+                bad["presentation"]["actual_size"] = size
+                history.validate_plan(bad)
 
 
 if __name__ == "__main__":
